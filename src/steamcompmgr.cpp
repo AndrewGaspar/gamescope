@@ -8846,8 +8846,14 @@ steamcompmgr_main(int argc, char **argv)
 		{
 			if ( g_nBFIBlankFrames > 0 )
 			{
+				// -r selects the nominal DRM mode (for example 120 Hz), but the
+				// selected mode may actually scan at 119.88 Hz. Once DRM has chosen
+				// it, pace both the client and BFI from that physical mode timing.
+				if ( g_nOutputRefresh > 0 )
+					g_nNestedRefresh = g_nOutputRefresh;
+
 				const int nBFIRefreshHz = gamescope::ConvertmHzToHz(
-					g_nNestedRefresh ? g_nNestedRefresh : g_nOutputRefresh );
+					g_nOutputRefresh );
 				const int nBFICycle = g_nBFIBlankFrames + 1;
 				if ( nBFIRefreshHz <= 0 || nBFIRefreshHz % nBFICycle != 0 )
 				{
