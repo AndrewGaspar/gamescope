@@ -2581,6 +2581,9 @@ apply_crt_beam_simulation( global_focus_t *pFocus, FrameInfo_t *pFrameInfo )
 	}
 
 	static FrameInfo_t::Layer_t s_History[3];
+	// Retaining the texture wrapper alone is insufficient for imported client
+	// buffers: the commit owns the buffer lock that prevents swapchain reuse.
+	static gamescope::Rc<commit_t> s_HistoryCommits[3];
 	static steamcompmgr_win_t *s_pHistoryWindow = nullptr;
 	static bool s_bHistoryValid = false;
 
@@ -2588,14 +2591,23 @@ apply_crt_beam_simulation( global_focus_t *pFocus, FrameInfo_t *pFrameInfo )
 	{
 		s_pHistoryWindow = pFocus->focusWindow;
 		s_bHistoryValid = false;
+		s_HistoryCommits[0] = nullptr;
+		s_HistoryCommits[1] = nullptr;
+		s_HistoryCommits[2] = nullptr;
 	}
 
 	const FrameInfo_t::Layer_t currentBase = pFrameInfo->layers[0];
+	gamescope::Rc<commit_t> currentCommit;
+	if ( pFocus->focusWindow )
+		get_window_last_done_commit( pFocus->focusWindow, currentCommit );
 	if ( !s_bHistoryValid )
 	{
 		s_History[0] = currentBase;
 		s_History[1] = currentBase;
 		s_History[2] = currentBase;
+		s_HistoryCommits[0] = currentCommit;
+		s_HistoryCommits[1] = currentCommit;
+		s_HistoryCommits[2] = currentCommit;
 		s_bHistoryValid = true;
 	}
 	else if ( g_nCRTBeamPhase == 0 )
@@ -2603,6 +2615,9 @@ apply_crt_beam_simulation( global_focus_t *pFocus, FrameInfo_t *pFrameInfo )
 		s_History[2] = s_History[1];
 		s_History[1] = s_History[0];
 		s_History[0] = currentBase;
+		s_HistoryCommits[2] = s_HistoryCommits[1];
+		s_HistoryCommits[1] = s_HistoryCommits[0];
+		s_HistoryCommits[0] = currentCommit;
 	}
 
 	for ( int i = pFrameInfo->layerCount - 1; i >= 1; --i )
