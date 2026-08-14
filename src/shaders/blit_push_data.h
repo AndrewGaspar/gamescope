@@ -18,5 +18,9 @@ uniform layers_t {
     float u_itmTargetNits;
 
     uint u_rotation;
-};
 
+	uint u_crtBeamEnabled;
+	uint u_crtBeamPhase;
+	float u_crtBeamFramesPerHz;
+	float u_crtBeamGain;
+};

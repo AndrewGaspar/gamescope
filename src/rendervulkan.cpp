@@ -3736,11 +3736,20 @@ struct BlitPushData_t
 
 	uint32_t u_rotation;
 
+	uint32_t u_crtBeamEnabled;
+	uint32_t u_crtBeamPhase;
+	float u_crtBeamFramesPerHz;
+	float u_crtBeamGain;
+
 	explicit BlitPushData_t(const struct FrameInfo_t *frameInfo, uint32_t rotation = 0)
 	{
 		u_shaderFilter = 0;
 		u_alphaMode = 0;
 		u_rotation = rotation;
+		u_crtBeamEnabled = frameInfo->crtBeamEnabled;
+		u_crtBeamPhase = frameInfo->crtBeamPhase;
+		u_crtBeamFramesPerHz = frameInfo->crtBeamFramesPerHz;
+		u_crtBeamGain = frameInfo->crtBeamGain;
 
 		for (int i = 0; i < frameInfo->layerCount; i++) {
 			const FrameInfo_t::Layer_t *layer = &frameInfo->layers[i];
@@ -3786,6 +3795,10 @@ struct BlitPushData_t
         u_shaderFilter = (uint32_t)GamescopeUpscaleFilter::LINEAR;
 		u_alphaMode = 0;
 		u_rotation = 0;
+		u_crtBeamEnabled = 0;
+		u_crtBeamPhase = 0;
+		u_crtBeamFramesPerHz = 1.0f;
+		u_crtBeamGain = 1.0f;
 		ctm[0] = glm::mat3x4
 		{
 			1, 0, 0, 0,

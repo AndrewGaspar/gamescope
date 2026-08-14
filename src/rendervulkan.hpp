@@ -293,6 +293,11 @@ struct FrameInfo_t
 	bool applyOutputColorMgmt; // drm only
 	EOTF outputEncodingEOTF;
 
+	bool crtBeamEnabled;
+	uint32_t crtBeamPhase;
+	float crtBeamFramesPerHz;
+	float crtBeamGain;
+
 	int layerCount;
 	struct Layer_t
 	{

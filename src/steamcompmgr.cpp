@@ -163,6 +163,10 @@ bool g_bForceHDRSupportDebug = false;
 static int g_nBFIBlankFrames = 0;
 static float g_flBFIBrightnessGain = 1.0f;
 static gamescope::OwningRc<CVulkanTexture> g_pBFIBlackTexture;
+static int g_nCRTSimulateHz = 0;
+static int g_nCRTFramesPerHz = 0;
+static int g_nCRTBeamPhase = 0;
+static float g_flCRTGain = 0.7f;
 extern float g_flInternalDisplayBrightnessNits;
 extern float g_flHDRItmSdrNits;
 extern float g_flHDRItmTargetNits;
@@ -2556,6 +2560,70 @@ paint_bfi_black( global_focus_t *pFocus )
 	return pConnector->Present( &frameInfo, false ) == 0;
 }
 
+static bool
+apply_crt_beam_simulation( global_focus_t *pFocus, FrameInfo_t *pFrameInfo )
+{
+	if ( !pFocus || !pFrameInfo || pFrameInfo->layerCount < 1 || g_nCRTFramesPerHz < 2 )
+		return false;
+
+	// Two extra sampler slots hold the prior base frames. Preserve overlays and
+	// the cursor whenever the normal scene fits in Gamescope's six-layer limit.
+	if ( pFrameInfo->layerCount + 2 > k_nMaxLayers )
+	{
+		static bool s_bWarnedLayerOverflow = false;
+		if ( !s_bWarnedLayerOverflow )
+		{
+			xwm_log.errorf( "CRT beam simulation disabled for a frame: scene needs %d layers, maximum with history is %d",
+				pFrameInfo->layerCount, k_nMaxLayers - 2 );
+			s_bWarnedLayerOverflow = true;
+		}
+		return false;
+	}
+
+	static FrameInfo_t::Layer_t s_History[3];
+	static steamcompmgr_win_t *s_pHistoryWindow = nullptr;
+	static bool s_bHistoryValid = false;
+
+	if ( s_pHistoryWindow != pFocus->focusWindow )
+	{
+		s_pHistoryWindow = pFocus->focusWindow;
+		s_bHistoryValid = false;
+	}
+
+	const FrameInfo_t::Layer_t currentBase = pFrameInfo->layers[0];
+	if ( !s_bHistoryValid )
+	{
+		s_History[0] = currentBase;
+		s_History[1] = currentBase;
+		s_History[2] = currentBase;
+		s_bHistoryValid = true;
+	}
+	else if ( g_nCRTBeamPhase == 0 )
+	{
+		s_History[2] = s_History[1];
+		s_History[1] = s_History[0];
+		s_History[0] = currentBase;
+	}
+
+	for ( int i = pFrameInfo->layerCount - 1; i >= 1; --i )
+		pFrameInfo->layers[i + 2] = pFrameInfo->layers[i];
+
+	pFrameInfo->layers[0] = s_History[0];
+	pFrameInfo->layers[1] = s_History[1];
+	pFrameInfo->layers[2] = s_History[2];
+	pFrameInfo->layerCount += 2;
+	pFrameInfo->crtBeamEnabled = true;
+	pFrameInfo->crtBeamPhase = uint32_t( g_nCRTBeamPhase );
+	pFrameInfo->crtBeamFramesPerHz = float( g_nCRTFramesPerHz );
+	pFrameInfo->crtBeamGain = g_flCRTGain;
+	pFrameInfo->allowVRR = false;
+	pFrameInfo->useFSRLayer0 = false;
+	pFrameInfo->useNISLayer0 = false;
+	pFrameInfo->blurLayer0 = BLUR_MODE_OFF;
+
+	return true;
+}
+
 static void
 paint_all( global_focus_t *pFocus, bool async )
 {
@@ -2897,6 +2965,9 @@ paint_all( global_focus_t *pFocus, bool async )
 			frameInfo.lut3D[i] = g_ColorMgmtLuts[i].vk_lut3d;
 		}
 	}
+
+	if ( g_nCRTSimulateHz > 0 )
+		apply_crt_beam_simulation( pFocus, &frameInfo );
 
 	if ( pConnector && pConnector->Present( &frameInfo, async ) != 0 )
 	{
@@ -5936,6 +6007,8 @@ static bool steamcompmgr_should_vblank_window( bool bShouldLimitFPS, uint64_t vb
 
 	if ( g_nBFIBlankFrames > 0 && vblank_idx % uint64_t( g_nBFIBlankFrames + 1 ) != 0 )
 		return false;
+	if ( g_nCRTFramesPerHz > 1 && vblank_idx % uint64_t( g_nCRTFramesPerHz ) != 0 )
+		return false;
 
 	int nRefreshHz = gamescope::ConvertmHzToHz( g_nNestedRefresh ? g_nNestedRefresh : g_nOutputRefresh );
 	int nTargetFPS = g_nSteamCompMgrTargetFPS;
@@ -8480,6 +8553,22 @@ steamcompmgr_main(int argc, char **argv)
 						fprintf( stderr, "gamescope: --bfi-brightness-gain must be between 1.0 and 4.0\n" );
 						exit( 1 );
 					}
+				} else if (strcmp(opt_name, "crt-simulate-hz") == 0) {
+					g_nCRTSimulateHz = atoi(optarg);
+					if ( g_nCRTSimulateHz < 20 || g_nCRTSimulateHz > 240 )
+					{
+						fprintf( stderr, "gamescope: --crt-simulate-hz must be between 20 and 240\n" );
+						exit( 1 );
+					}
+				} else if (strcmp(opt_name, "crt-gain") == 0) {
+					char *end = nullptr;
+					g_flCRTGain = strtof( optarg, &end );
+					if ( !end || *end != '\0' || !std::isfinite( g_flCRTGain ) ||
+						 g_flCRTGain < 0.1f || g_flCRTGain > 1.0f )
+					{
+						fprintf( stderr, "gamescope: --crt-gain must be between 0.1 and 1.0\n" );
+						exit( 1 );
+					}
 				} else if (strcmp(opt_name, "reshade-effect") == 0) {
 					g_reshade_effect = optarg;
 				} else if (strcmp(opt_name, "reshade-technique-idx") == 0) {
@@ -8491,6 +8580,12 @@ steamcompmgr_main(int argc, char **argv)
 			case '?':
 				assert(false); // unreachable
 		}
+	}
+
+	if ( g_nBFIBlankFrames > 0 && g_nCRTSimulateHz > 0 )
+	{
+		fprintf( stderr, "gamescope: BFI and CRT beam simulation are mutually exclusive\n" );
+		exit( 1 );
 	}
 
 	if ( g_nBFIBlankFrames > 0 )
@@ -8511,9 +8606,27 @@ steamcompmgr_main(int argc, char **argv)
 		fprintf( stderr, "gamescope: BFI enabled: 1 real + %d black refreshes, HDR brightness gain %.2fx\n",
 			g_nBFIBlankFrames, g_flBFIBrightnessGain );
 	}
+	else if ( g_nCRTSimulateHz > 0 )
+	{
+		if ( g_nSteamCompMgrTargetFPS )
+		{
+			fprintf( stderr, "gamescope: --crt-simulate-hz cannot be combined with --framerate-limit\n" );
+			exit( 1 );
+		}
+
+		cv_adaptive_sync = false;
+		cv_composite_force = true;
+		fprintf( stderr, "gamescope: CRT beam simulation enabled: %d Hz target, %.2f gain; fixed SDR output recommended\n",
+			g_nCRTSimulateHz, g_flCRTGain );
+	}
 	else if ( g_flBFIBrightnessGain != 1.0f )
 	{
 		fprintf( stderr, "gamescope: --bfi-brightness-gain requires --bfi-blank-frames\n" );
+		exit( 1 );
+	}
+	else if ( g_flCRTGain != 0.7f )
+	{
+		fprintf( stderr, "gamescope: --crt-gain requires --crt-simulate-hz\n" );
 		exit( 1 );
 	}
 
@@ -8870,6 +8983,23 @@ steamcompmgr_main(int argc, char **argv)
 				fprintf( stderr, "gamescope: BFI cadence: %d Hz scanout, %d Hz application frames\n",
 					nBFIRefreshHz, nBFIRefreshHz / nBFICycle );
 			}
+			else if ( g_nCRTSimulateHz > 0 )
+			{
+				if ( g_nOutputRefresh > 0 )
+					g_nNestedRefresh = g_nOutputRefresh;
+
+				const int nOutputHz = gamescope::ConvertmHzToHz( g_nOutputRefresh );
+				if ( nOutputHz <= g_nCRTSimulateHz || nOutputHz % g_nCRTSimulateHz != 0 )
+				{
+					fprintf( stderr,
+						"gamescope: CRT simulation currently requires fixed output Hz to be an integer multiple greater than %d; current refresh is %d Hz\n",
+						g_nCRTSimulateHz, nOutputHz );
+					exit( 1 );
+				}
+				g_nCRTFramesPerHz = nOutputHz / g_nCRTSimulateHz;
+				fprintf( stderr, "gamescope: CRT cadence: %d Hz scanout, %d Hz simulated tube, %d subframes per tube refresh\n",
+					nOutputHz, g_nCRTSimulateHz, g_nCRTFramesPerHz );
+			}
 
 			if ( g_nXWaylandCount > 1 )
 			{
@@ -8982,6 +9112,8 @@ steamcompmgr_main(int argc, char **argv)
 		if ( vblank )
 		{
 			vblank_idx++;
+			if ( g_nCRTFramesPerHz > 1 )
+				g_nCRTBeamPhase = int( ( vblank_idx - 1 ) % uint64_t( g_nCRTFramesPerHz ) );
 
 			int nRealRefreshmHz = g_nNestedRefresh ? g_nNestedRefresh : g_nOutputRefresh;
 			g_SteamCompMgrAppRefreshCycle = gamescope::mHzToRefreshCycle( nRealRefreshmHz );
@@ -8990,6 +9122,11 @@ steamcompmgr_main(int argc, char **argv)
 			{
 				g_SteamCompMgrLimitedAppRefreshCycle =
 					g_SteamCompMgrAppRefreshCycle * uint64_t( g_nBFIBlankFrames + 1 );
+			}
+			else if ( g_nCRTFramesPerHz > 1 )
+			{
+				g_SteamCompMgrLimitedAppRefreshCycle =
+					g_SteamCompMgrAppRefreshCycle * uint64_t( g_nCRTFramesPerHz );
 			}
 			else if ( g_nSteamCompMgrTargetFPS )
 			{
@@ -9012,6 +9149,7 @@ steamcompmgr_main(int argc, char **argv)
 
 		const bool bBFIBlackFrame = vblank && g_nBFIBlankFrames > 0 &&
 			( ( vblank_idx - 1 ) % uint64_t( g_nBFIBlankFrames + 1 ) != 0 );
+		const bool bCRTSubframe = vblank && g_nCRTFramesPerHz > 1 && g_nCRTBeamPhase != 0;
 
 		// Handle presentation-time stuff
 		//
@@ -9033,7 +9171,7 @@ steamcompmgr_main(int argc, char **argv)
 		// actually show a window if it wasn't visible, but we could! And that is the first
 		// opportunity it had. It's confusing but we need this for forward progress.
 
-		if ( vblank && !bBFIBlackFrame )
+		if ( vblank && !bBFIBlackFrame && !bCRTSubframe )
 		{
 			wlserver_lock();
 			gamescope_xwayland_server_t *server = NULL;
@@ -9276,7 +9414,7 @@ steamcompmgr_main(int argc, char **argv)
 				bShouldPaint = false;
 			}
 
-			if ( g_nBFIBlankFrames > 0 )
+			if ( g_nBFIBlankFrames > 0 || g_nCRTSimulateHz > 0 )
 				bShouldPaint = vblank;
 
 			if ( bShouldPaint )

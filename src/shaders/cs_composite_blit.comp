@@ -19,6 +19,38 @@ vec4 sampleLayer(uint layerIdx, vec2 uv) {
     return sampleLayer(s_samplers[layerIdx], layerIdx, uv, true);
 }
 
+// Temporal CRT beam simulation adapted from Blur Busters' MIT-licensed
+// crt-beam-simulator by Mark Rejhon and Timothy Lottes. The first three layers
+// are the current, previous, and second-previous unprocessed base frames.
+vec3 simulateCrtBeam(vec2 uv, uvec2 outSize) {
+    vec3 pixelCurr  = max(sampleLayer(0, uv).rgb, vec3(0.0));
+    vec3 pixelPrev1 = max(sampleLayer(1, uv).rgb, vec3(0.0));
+    vec3 pixelPrev2 = max(sampleLayer(2, uv).rgb, vec3(0.0));
+
+    float framesPerHz = max(u_crtBeamFramesPerHz, 1.0);
+    float brightnessScale = framesPerHz * u_crtBeamGain;
+    vec3 lengthCurr  = pixelCurr  * brightnessScale;
+    vec3 lengthPrev1 = pixelPrev1 * brightnessScale;
+    vec3 lengthPrev2 = pixelPrev2 * brightnessScale;
+
+    // Gamescope's logical output coordinates have their origin at top-left, so
+    // increasing Y directly models a top-to-bottom electron beam.
+    float tubePos = (uv.y + 0.5) / float(outSize.y);
+    float tubeFrame = tubePos * framesPerHz;
+    float intervalStart = float(u_crtBeamPhase);
+    float intervalEnd = intervalStart + 1.0;
+
+    float startPrev2 = tubeFrame - framesPerHz;
+    float startPrev1 = tubeFrame;
+    float startCurr = tubeFrame + framesPerHz;
+
+    vec3 overlapPrev2 = max(vec3(0.0), min(vec3(intervalEnd), vec3(startPrev2) + lengthPrev2) - max(vec3(intervalStart), vec3(startPrev2)));
+    vec3 overlapPrev1 = max(vec3(0.0), min(vec3(intervalEnd), vec3(startPrev1) + lengthPrev1) - max(vec3(intervalStart), vec3(startPrev1)));
+    vec3 overlapCurr  = max(vec3(0.0), min(vec3(intervalEnd), vec3(startCurr)  + lengthCurr)  - max(vec3(intervalStart), vec3(startCurr)));
+
+    return overlapPrev2 + overlapPrev1 + overlapCurr;
+}
+
 void main() {
     uvec2 coord = uvec2(gl_GlobalInvocationID.x, gl_GlobalInvocationID.y);
     uvec2 outSize = outputLogicalSize(u_rotation);
@@ -32,11 +64,16 @@ void main() {
     if (checkDebugFlag(compositedebug_PlaneBorders))
         outputValue = vec4(1.0f, 0.0f, 0.0f, 0.0f);
 
-    if (c_layerCount > 0) {
+    int firstOverlay = 1;
+    if (u_crtBeamEnabled != 0u && c_layerCount >= 3) {
+        outputValue = vec4(simulateCrtBeam(uv, outSize), 1.0);
+        firstOverlay = 3;
+    }
+    else if (c_layerCount > 0) {
         outputValue = sampleLayer(0, uv) * u_opacity[0];
     }
 
-    for (int i = 1; i < c_layerCount; i++) {
+    for (int i = firstOverlay; i < c_layerCount; i++) {
         vec4 layerColor = sampleLayer(i, uv);
         outputValue = BlendLayer( i, outputValue, layerColor, u_opacity[i] );
     }
