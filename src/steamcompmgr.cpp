@@ -2521,12 +2521,9 @@ paint_bfi_black( global_focus_t *pFocus )
 	if ( !pConnector )
 		return false;
 
-	if ( !g_pBFIBlackTexture ||
-		 g_pBFIBlackTexture->width() != g_nOutputWidth ||
-		 g_pBFIBlackTexture->height() != g_nOutputHeight )
+	if ( !g_pBFIBlackTexture )
 	{
-		g_pBFIBlackTexture = vulkan_create_flat_texture(
-			g_nOutputWidth, g_nOutputHeight, 0, 0, 0, 255 );
+		g_pBFIBlackTexture = vulkan_create_flat_texture( 1, 1, 0, 0, 0, 255 );
 	}
 	if ( !g_pBFIBlackTexture )
 		return false;
@@ -2541,7 +2538,10 @@ paint_bfi_black( global_focus_t *pFocus )
 	layer.tex = g_pBFIBlackTexture;
 	layer.zpos = g_zposBase;
 	layer.offset = { 0.0f, 0.0f };
-	layer.scale = { 1.0f, 1.0f };
+	layer.scale = {
+		1.0f / float( g_nOutputWidth ),
+		1.0f / float( g_nOutputHeight ),
+	};
 	layer.opacity = 1.0f;
 	layer.filter = GamescopeUpscaleFilter::NEAREST;
 	layer.blackBorder = true;
