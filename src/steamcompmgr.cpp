@@ -160,6 +160,9 @@ static lut3d_t g_tmpLut3d;
 extern int g_nDynamicRefreshHz;
 
 bool g_bForceHDRSupportDebug = false;
+static int g_nBFIBlankFrames = 0;
+static float g_flBFIBrightnessGain = 1.0f;
+static gamescope::OwningRc<CVulkanTexture> g_pBFIBlackTexture;
 extern float g_flInternalDisplayBrightnessNits;
 extern float g_flHDRItmSdrNits;
 extern float g_flHDRItmTargetNits;
@@ -2505,6 +2508,48 @@ gamescope::ConVar<bool> cv_paint_steam_overlay_plane{ "paint_steam_overlay_plane
 gamescope::ConVar<bool> cv_paint_external_overlay_plane{ "paint_external_overlay_plane", true };
 gamescope::ConVar<bool> cv_paint_cursor_plane{ "paint_cursor_plane", true };
 gamescope::ConVar<bool> cv_paint_mura_plane{ "paint_mura_plane", true };
+
+static bool
+paint_bfi_black( global_focus_t *pFocus )
+{
+	if ( !pFocus || GetBackend()->IsPaused() )
+		return false;
+
+	gamescope::IBackendConnector *pConnector = pFocus->pVirtualConnector.get();
+	if ( !pConnector )
+		pConnector = GetBackend()->GetCurrentConnector();
+	if ( !pConnector )
+		return false;
+
+	if ( !g_pBFIBlackTexture ||
+		 g_pBFIBlackTexture->width() != g_nOutputWidth ||
+		 g_pBFIBlackTexture->height() != g_nOutputHeight )
+	{
+		g_pBFIBlackTexture = vulkan_create_flat_texture(
+			g_nOutputWidth, g_nOutputHeight, 0, 0, 0, 255 );
+	}
+	if ( !g_pBFIBlackTexture )
+		return false;
+
+	FrameInfo_t frameInfo{};
+	frameInfo.allowVRR = false;
+	frameInfo.applyOutputColorMgmt = false;
+	frameInfo.outputEncodingEOTF = g_bOutputHDREnabled ? EOTF_PQ : EOTF_Gamma22;
+	frameInfo.layerCount = 1;
+
+	FrameInfo_t::Layer_t &layer = frameInfo.layers[0];
+	layer.tex = g_pBFIBlackTexture;
+	layer.zpos = g_zposBase;
+	layer.offset = { 0.0f, 0.0f };
+	layer.scale = { 1.0f, 1.0f };
+	layer.opacity = 1.0f;
+	layer.filter = GamescopeUpscaleFilter::NEAREST;
+	layer.blackBorder = true;
+	layer.applyColorMgmt = false;
+	layer.colorspace = GAMESCOPE_APP_TEXTURE_COLORSPACE_PASSTHRU;
+
+	return pConnector->Present( &frameInfo, false ) == 0;
+}
 
 static void
 paint_all( global_focus_t *pFocus, bool async )
@@ -5884,6 +5929,9 @@ static bool steamcompmgr_should_vblank_window( bool bShouldLimitFPS, uint64_t vb
 {
 	bool bSendCallback = true;
 
+	if ( g_nBFIBlankFrames > 0 && vblank_idx % uint64_t( g_nBFIBlankFrames + 1 ) != 0 )
+		return false;
+
 	int nRefreshHz = gamescope::ConvertmHzToHz( g_nNestedRefresh ? g_nNestedRefresh : g_nOutputRefresh );
 	int nTargetFPS = g_nSteamCompMgrTargetFPS;
 
@@ -6805,6 +6853,7 @@ steamcompmgr_exit(void)
 	}
 
 	g_VirtualConnectorFocuses.clear();
+	g_pBFIBlackTexture = nullptr;
 
     gamescope::IBackend::Set( nullptr );
 
@@ -8410,6 +8459,22 @@ steamcompmgr_main(int argc, char **argv)
 					g_flHDRItmTargetNits = atof(optarg);
 				} else if (strcmp(opt_name, "framerate-limit") == 0) {
 					g_nSteamCompMgrTargetFPS = atoi(optarg);
+				} else if (strcmp(opt_name, "bfi-blank-frames") == 0) {
+					g_nBFIBlankFrames = atoi(optarg);
+					if ( g_nBFIBlankFrames < 1 || g_nBFIBlankFrames > 3 )
+					{
+						fprintf( stderr, "gamescope: --bfi-blank-frames must be between 1 and 3\n" );
+						exit( 1 );
+					}
+				} else if (strcmp(opt_name, "bfi-brightness-gain") == 0) {
+					char *end = nullptr;
+					g_flBFIBrightnessGain = strtof( optarg, &end );
+					if ( !end || *end != '\0' || !std::isfinite( g_flBFIBrightnessGain ) ||
+						 g_flBFIBrightnessGain < 1.0f || g_flBFIBrightnessGain > 4.0f )
+					{
+						fprintf( stderr, "gamescope: --bfi-brightness-gain must be between 1.0 and 4.0\n" );
+						exit( 1 );
+					}
 				} else if (strcmp(opt_name, "reshade-effect") == 0) {
 					g_reshade_effect = optarg;
 				} else if (strcmp(opt_name, "reshade-technique-idx") == 0) {
@@ -8421,6 +8486,30 @@ steamcompmgr_main(int argc, char **argv)
 			case '?':
 				assert(false); // unreachable
 		}
+	}
+
+	if ( g_nBFIBlankFrames > 0 )
+	{
+		if ( g_nSteamCompMgrTargetFPS )
+		{
+			fprintf( stderr, "gamescope: --bfi-blank-frames cannot be combined with --framerate-limit\n" );
+			exit( 1 );
+		}
+
+		cv_adaptive_sync = false;
+		if ( g_flBFIBrightnessGain > 1.0f )
+		{
+			cv_hdr_enabled = true;
+			g_ColorMgmt.pending.flSDROnHDRBrightness *= g_flBFIBrightnessGain;
+		}
+
+		fprintf( stderr, "gamescope: BFI enabled: 1 real + %d black refreshes, HDR brightness gain %.2fx\n",
+			g_nBFIBlankFrames, g_flBFIBrightnessGain );
+	}
+	else if ( g_flBFIBrightnessGain != 1.0f )
+	{
+		fprintf( stderr, "gamescope: --bfi-brightness-gain requires --bfi-blank-frames\n" );
+		exit( 1 );
 	}
 
 	int subCommandArg = -1;
@@ -8755,6 +8844,22 @@ steamcompmgr_main(int argc, char **argv)
 			 currentHDROutput != g_bOutputHDREnabled ||
 			 currentHDRForce != g_bForceHDRSupportDebug )
 		{
+			if ( g_nBFIBlankFrames > 0 )
+			{
+				const int nBFIRefreshHz = gamescope::ConvertmHzToHz(
+					g_nNestedRefresh ? g_nNestedRefresh : g_nOutputRefresh );
+				const int nBFICycle = g_nBFIBlankFrames + 1;
+				if ( nBFIRefreshHz <= 0 || nBFIRefreshHz % nBFICycle != 0 )
+				{
+					fprintf( stderr,
+						"gamescope: BFI requires a fixed refresh divisible by %d; current refresh is %d Hz\n",
+						nBFICycle, nBFIRefreshHz );
+					exit( 1 );
+				}
+				fprintf( stderr, "gamescope: BFI cadence: %d Hz scanout, %d Hz application frames\n",
+					nBFIRefreshHz, nBFIRefreshHz / nBFICycle );
+			}
+
 			if ( g_nXWaylandCount > 1 )
 			{
 				g_nNestedHeight = ( g_nNestedWidth * g_nOutputHeight ) / g_nOutputWidth;
@@ -8870,7 +8975,12 @@ steamcompmgr_main(int argc, char **argv)
 			int nRealRefreshmHz = g_nNestedRefresh ? g_nNestedRefresh : g_nOutputRefresh;
 			g_SteamCompMgrAppRefreshCycle = gamescope::mHzToRefreshCycle( nRealRefreshmHz );
 			g_SteamCompMgrLimitedAppRefreshCycle = g_SteamCompMgrAppRefreshCycle;
-			if ( g_nSteamCompMgrTargetFPS )
+			if ( g_nBFIBlankFrames > 0 )
+			{
+				g_SteamCompMgrLimitedAppRefreshCycle =
+					g_SteamCompMgrAppRefreshCycle * uint64_t( g_nBFIBlankFrames + 1 );
+			}
+			else if ( g_nSteamCompMgrTargetFPS )
 			{
 				int nRealRefreshHz = gamescope::ConvertmHzToHz( nRealRefreshmHz );
 				int nTargetFPS = g_nSteamCompMgrTargetFPS;
@@ -8888,6 +8998,9 @@ steamcompmgr_main(int argc, char **argv)
 				}
 			}
 		}
+
+		const bool bBFIBlackFrame = vblank && g_nBFIBlankFrames > 0 &&
+			( ( vblank_idx - 1 ) % uint64_t( g_nBFIBlankFrames + 1 ) != 0 );
 
 		// Handle presentation-time stuff
 		//
@@ -8909,7 +9022,7 @@ steamcompmgr_main(int argc, char **argv)
 		// actually show a window if it wasn't visible, but we could! And that is the first
 		// opportunity it had. It's confusing but we need this for forward progress.
 
-		if ( vblank )
+		if ( vblank && !bBFIBlackFrame )
 		{
 			wlserver_lock();
 			gamescope_xwayland_server_t *server = NULL;
@@ -9152,11 +9265,18 @@ steamcompmgr_main(int argc, char **argv)
 				bShouldPaint = false;
 			}
 
+			if ( g_nBFIBlankFrames > 0 )
+				bShouldPaint = vblank;
+
 			if ( bShouldPaint )
 			{
-				paint_all( pPaintFocus, eFlipType == FlipType::Async );
-
-				bPainted = true;
+				if ( bBFIBlackFrame )
+					bPainted |= paint_bfi_black( pPaintFocus );
+				else
+				{
+					paint_all( pPaintFocus, false );
+					bPainted = true;
+				}
 			}
 		}
 

@@ -94,6 +94,8 @@ const struct option *gamescope_options = (struct option[]){
 	{ "generate-drm-mode", required_argument, nullptr, 0 },
 	{ "immediate-flips", no_argument, nullptr, 0 },
 	{ "framerate-limit", required_argument, nullptr, 0 },
+	{ "bfi-blank-frames", required_argument, nullptr, 0 },
+	{ "bfi-brightness-gain", required_argument, nullptr, 0 },
 
 	// openvr options
 #if HAVE_OPENVR
@@ -217,6 +219,8 @@ const char usage[] =
 	"  --hdr-itm-target-nits          set the target luminace of the inverse tone mapping process.\n"
 	"                                 Default: 1000 nits, Max: 10000 nits\n"
 	"  --framerate-limit              Set a simple framerate limit. Used as a divisor of the refresh rate, rounds down eg 60 / 59 -> 60fps, 60 / 25 -> 30fps. Default: 0, disabled.\n"
+	"  --bfi-blank-frames N           Enable black frame insertion with N black refreshes after each real frame (1-3). Requires a fixed refresh divisible by N+1; disables adaptive sync.\n"
+	"  --bfi-brightness-gain G        Enable HDR output and multiply SDR-on-HDR reference white by G (1.0-4.0). Panel limits and ABL still apply.\n"
 	"  --mangoapp                     Launch with the mangoapp (mangohud) performance overlay enabled. You should use this instead of using mangohud on the game or gamescope.\n"
 	"  --adaptive-sync                Enable adaptive sync if available (variable rate refresh)\n"
 	"\n"
